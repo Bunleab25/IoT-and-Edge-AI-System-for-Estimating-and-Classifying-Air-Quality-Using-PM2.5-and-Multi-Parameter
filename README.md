@@ -1,6 +1,6 @@
 # AeroSense: Edge AI Air-Quality Forecasting
 
-AeroSense is an air-quality forecasting project for the RMUTI campus in Nakhon Ratchasima, Thailand. Its Python pipeline combines daily PM2.5 observations with weather measurements, engineers chronological features, and trains three AQI-category classifiers for one-, two-, and three-day horizons. A Flask API is provided for Raspberry Pi deployment, with an Arduino sensor sketch and a sanitized Node-RED flow included in the repository.
+AeroSense is an air-quality forecasting project for the RMUTI campus in Nakhon Ratchasima. Its Python pipeline combines daily PM2.5 observations with weather measurements, engineers chronological features, and trains three AQI-category classifiers for one-, two-, and three-day horizons. A Flask API is provided for Raspberry Pi deployment, with an Arduino sensor sketch and a sanitized Node-RED flow included in the repository.
 
 The project is a research and deployment prototype, not a fully packaged production service. Model binaries are generated locally by training and are intentionally excluded from version control; a fresh checkout must train compatible artifacts before edge inference.
 
