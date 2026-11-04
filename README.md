@@ -82,6 +82,14 @@ python -m pip install -e .
 
 The training configuration lives in `configs/experiment.json`. Direct dependencies are pinned in `requirements.txt`; run provenance records resolved package versions. Training records config and input hashes, git revision/dirty state, source hashes, split dates and sizes, selected models, and search parameters in `outputs/training_run.json`. The configured search evaluates 12 parameter samples per model and horizon over five expanding chronological folds (six searches total); search-level parallelism is capped at four workers and each estimator uses one thread. Use the same config, data hashes, and dependency versions when comparing runs; the manifest improves reproducibility but does not guarantee bit-for-bit identity across CPUs or native library builds.
 
+## Watch the project demo
+
+[View the AeroSense project demo on Google Drive](https://drive.google.com/file/d/1ZBaThMWqu1WVWN_qMMPNg4z8c7zzlTCN/view).
+
+## Connect
+
+[Connect on LinkedIn](https://lnkd.in/p/gRp-V3Y4).
+
 ## Run the offline demo
 
 The demo needs no API keys, network access, model artifacts, or extra sample data. It rebuilds features from the checked-in cleaned data, trains a small seeded Random Forest per horizon on the earlier chronological partition, applies the three-row target embargo, and compares against persistence. It writes detailed metrics and provenance to `outputs/demo_report.json`:
