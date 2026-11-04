@@ -1,7 +1,6 @@
 """Clean and validate the RMUTI daily air-quality dataset."""
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +14,13 @@ NUMERIC_COLUMNS = [
     "windspeed_10m",
     "winddirection_10m",
 ]
+
+
+def causally_fill_measurements(frame: pd.DataFrame) -> pd.DataFrame:
+    """Fill at most three consecutive gaps from prior observations only."""
+    filled = frame[NUMERIC_COLUMNS].ffill(limit=3)
+    filled["winddirection_10m"] = filled["winddirection_10m"] % 360.0
+    return filled
 
 
 def pm25_to_category(pm25: float) -> str:
@@ -41,18 +47,6 @@ def _format_gap_ranges(dates: pd.Index) -> str:
         prev = current
     ranges.append(f"{start.date()} to {prev.date()}")
     return "; ".join(ranges)
-
-
-def interpolate_circular_direction(series: pd.Series) -> pd.Series:
-    """Interpolate compass bearings using sine/cosine components to avoid 0/360 discontinuity."""
-    working = series.copy()
-    radians = np.deg2rad(working)
-    sin_values = np.sin(radians)
-    cos_values = np.cos(radians)
-    sin_interp = pd.Series(sin_values, index=working.index).interpolate(method="linear", limit_direction="both")
-    cos_interp = pd.Series(cos_values, index=working.index).interpolate(method="linear", limit_direction="both")
-    direction = np.mod(np.degrees(np.arctan2(sin_interp.to_numpy(), cos_interp.to_numpy())), 360.0)
-    return pd.Series(direction, index=working.index)
 
 
 def main() -> None:
@@ -110,10 +104,9 @@ def main() -> None:
         for start, end in long_gap_ranges:
             print(f"  - {start.date()} to {end.date()}")
 
-    interpolated = df[NUMERIC_COLUMNS].copy()
-    for column in ["pm25", "temperature_2m", "relative_humidity_2m", "surface_pressure", "windspeed_10m"]:
-        interpolated[column] = interpolated[column].interpolate(method="linear", limit=3, limit_direction="both")
-    interpolated["winddirection_10m"] = interpolate_circular_direction(interpolated["winddirection_10m"])
+    # Forward-fill only from observed history; two-sided interpolation would
+    # allow later measurements to influence earlier rows before the time split.
+    interpolated = causally_fill_measurements(df)
     df[NUMERIC_COLUMNS] = interpolated
 
     for start, end in long_gap_ranges:
