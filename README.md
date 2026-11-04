@@ -86,6 +86,10 @@ The training configuration lives in `configs/experiment.json`. Direct dependenci
 
 [View the AeroSense project demo on Google Drive](https://drive.google.com/file/d/1ZBaThMWqu1WVWN_qMMPNg4z8c7zzlTCN/view).
 
+## Connect
+
+[Connect on LinkedIn](https://lnkd.in/p/gRp-V3Y4).
+
 ## Run the offline demo
 
 The demo needs no API keys, network access, model artifacts, or extra sample data. It rebuilds features from the checked-in cleaned data, trains a small seeded Random Forest per horizon on the earlier chronological partition, applies the three-row target embargo, and compares against persistence. It writes detailed metrics and provenance to `outputs/demo_report.json`:
