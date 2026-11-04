@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.egg-info/
 .venv/
 venv/
 .env
@@ -29,6 +30,7 @@ htmlcov/
 # Keep essential project data tracked
 !data/**/*.csv
 !data/**/*.json
+!configs/*.json
 !outputs/**/*.json
 !outputs/**/*.png
 !outputs/**/*.csv

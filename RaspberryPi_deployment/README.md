@@ -29,18 +29,47 @@ Raspberry Pi 5 (edge device)
         └── local API / dashboard output
 ```
 
-The edge service in this repo is implemented in [model.py](model.py). It accepts sensor readings, builds the required feature set, runs the trained model, and returns AQI predictions for the next three days.
+The edge service in this folder is implemented in [model.py](model.py). It accepts sensor readings, builds the same ordered 38-feature set used for training, runs the trained models, and returns AQI predictions for the next three days.
+
+## Model artifacts and input history
+
+Run the repository training pipeline to create `models/best_day1.pkl` through `models/best_day3.pkl`. Each artifact includes its feature schema and label mapping; this service validates both at startup and does not fall back to older `rf_day*.pkl` files. Retrain models when the feature contract changes.
+
+The API needs three prior daily observations to construct lag features. A cold start must supply PM2.5, temperature, humidity, pressure, wind speed, and wind direction, and collect at least three prior daily readings before forecasts can be produced. Wind speed and direction may be omitted from later requests when available in the local history log. Older history logs without wind measurements must be rebuilt with the new columns before starting the service.
+
+## Setup and service behavior
+
+From the repository root, create the environment, install the pinned dependencies, regenerate compatible data splits, train the horizon models, then start the service:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pip install -e .
+python scripts/03_feature_engineering.py
+python scripts/04_train_test_split.py
+python scripts/05_train_model.py
+python RaspberryPi_deployment/model.py
+```
+
+Training is a separate, comparatively expensive step. The service expects the resulting files in the repository-level `models/` directory, while the observation history is stored in this deployment folder as `live_sensor_log.csv`. Model binaries are generated locally and ignored by Git; `/health` reports models unavailable in a fresh checkout until training has produced compatible artifacts.
+
+`GET /health` reports model load status and history length. `POST /predict` accepts the fields shown below and returns predictions for day +1 through day +3. The service writes each submitted reading to the local history log, obtains weather context for later forecast horizons from Open-Meteo, and falls back to the latest sensor readings if the forecast request is unavailable. This endpoint is an inference interface; it does not directly read the Arduino sensor or configure MQTT/Node-RED.
+
+For local verification from the repository root, run `python -m pytest -q`. The Python tests cover the API using mock estimators and weather responses; they do not verify Raspberry Pi hardware, sensor wiring, network access, or MQTT integration.
 
 ## What this repo contains
 
-- [scripts/00_collect_data.py](scripts/00_collect_data.py): data collection from OpenAQ and weather sources
-- [scripts/01_data_cleaning.py](scripts/01_data_cleaning.py): data cleaning and labeling
-- [scripts/03_feature_engineering.py](scripts/03_feature_engineering.py): lag, rolling, and time features
-- [scripts/05_train_model.py](scripts/05_train_model.py): training and model comparison
-- [scripts/06_evaluate.py](scripts/06_evaluate.py): evaluation metrics and reporting
-- [scripts/07_forecast_pipeline.py](scripts/07_forecast_pipeline.py): forecast generation pipeline
+- [scripts/00_collect_data.py](../scripts/00_collect_data.py): data collection from OpenAQ and weather sources
+- [scripts/01_data_cleaning.py](../scripts/01_data_cleaning.py): data cleaning and labeling
+- [scripts/03_feature_engineering.py](../scripts/03_feature_engineering.py): lag, rolling, and time features
+- [scripts/05_train_model.py](../scripts/05_train_model.py): training and model comparison
+- [scripts/06_evaluate.py](../scripts/06_evaluate.py): evaluation metrics and reporting
+- [scripts/07_forecast_pipeline.py](../scripts/07_forecast_pipeline.py): forecast generation pipeline
+- [src/aerosense/model_contract.py](../src/aerosense/model_contract.py): shared features, labels, and artifact validation
+- [src/aerosense/experiment_utils.py](../src/aerosense/experiment_utils.py): experiment configuration and provenance
 - [model.py](model.py): Flask-based edge inference API for Raspberry Pi 5
-- [tests/test_openaq_parser.py](tests/test_openaq_parser.py): validation for the data pipeline
+- [tests/test_openaq_parser.py](../tests/test_openaq_parser.py): validation for the data pipeline
 
 ## AI and deployment goal
 
@@ -78,10 +107,10 @@ python scripts/07_forecast_pipeline.py
 ### Run the edge inference service
 
 ```bash
-python model.py
+python RaspberryPi_deployment/model.py
 ```
 
-Then send a request to the local API:
+After compatible models are trained and at least three prior daily readings have been accumulated, send a request to the local API. A cold start should include wind speed and direction:
 
 ```bash
 curl -X POST http://localhost:5001/predict \
@@ -90,7 +119,9 @@ curl -X POST http://localhost:5001/predict \
     "pm25": 42.3,
     "temperature": 28.5,
     "humidity": 65,
-    "pressure": 995
+    "pressure": 995,
+    "windspeed": 3.2,
+    "winddirection": 90
   }'
 ```
 
