@@ -2,37 +2,43 @@
 
 Flask inference service for AeroSense RMUTI. For the project overview, data and results, see the [root README](../README.md).
 
-## Contents
+## Files
 
 | File | Purpose |
 |---|---|
 | [`model.py`](model.py) | Flask API (`/predict`, `/health`) on port 5001 |
-| `rf_day1.pkl`, `rf_day2.pkl`, `rf_day3.pkl` | RandomForest models, one per horizon (45 features) |
-| `aqi_nowcast_model_smote.pkl` | Nowcast model trained with SMOTE |
-| [`test.py`](test.py) | Prints the feature names a model expects |
+| [`test.py`](test.py) | Helper script for inspecting a model |
+
+## Prerequisites
+
+Train the models from the repository root. The service reads `models/best_day1.pkl` to `models/best_day3.pkl`, which are Git-ignored. Each artifact carries its feature schema and label mapping, and the service validates both at startup. It does not fall back to the older `rf_day*.pkl` files, and models must be retrained whenever the feature contract changes.
+
+```bash
+python scripts/05_train_model.py
+```
 
 ## Run
 
 ```bash
-pip install -r ../requirements.txt
-python model.py
+python RaspberryPi_deployment/model.py
 ```
 
-The service keeps a rolling history in `live_sensor_log.csv`, created on first request.
+The service keeps a rolling daily history in a local log and needs at least 3 prior daily observations for lag features. On a cold start, send wind speed and direction with the first requests and collect enough history before expecting a forecast. Older history logs without wind columns must be rebuilt.
 
 ## API
 
 `POST /predict`
 
 ```json
-{ "pm25": 42.3, "temperature": 28.5, "humidity": 65, "pressure": 995 }
+{ "pm25": 42.3, "temperature": 28.5, "humidity": 65, "pressure": 995,
+  "windspeed": 3.2, "winddirection": 90 }
 ```
 
-Returns `predicted_category`, `confidence`, `class_probabilities` and `feature_confidence` for `day1`, `day2` and `day3`.
+`windspeed` and `winddirection` can be omitted only if they are already in the local history. The response has a `forecast` object with `day1`, `day2` and `day3`, plus `forecast_fetch_error` and `input_received`. Each forecast includes a category, confidence, class probabilities and a feature-confidence note.
 
-`GET /health` returns model-loading status and the history row count.
+`GET /health` reports which horizon models loaded.
 
 ## Behavior notes
 
-- Day+1 uses real history. Day+2 and Day+3 use forecast weather from Open-Meteo, with PM2.5 persisted from today.
-- If the weather API fails, today's weather is reused and `feature_confidence` is reported as low.
+- Day+2 and Day+3 use Open-Meteo forecast weather, with PM2.5 persisted from today.
+- If the weather API fails, the latest readings are reused and the failure is reported.
