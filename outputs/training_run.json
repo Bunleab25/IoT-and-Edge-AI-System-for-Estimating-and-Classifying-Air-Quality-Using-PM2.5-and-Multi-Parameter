@@ -1,0 +1,253 @@
+{
+  "run_started_at_utc": "2026-11-04T04:17:32.373324+00:00",
+  "git_revision": "8830d4056045149247e8b428913936b2d570bf12",
+  "git_worktree_dirty": true,
+  "source_sha256": {
+    "scripts/01_data_cleaning.py": "f63db7aa1ae5f04d0dea52175c80f9f996e391ddbbe7f1fd69d2af3b274784bd",
+    "scripts/03_feature_engineering.py": "aaaca16405b0e3a9db733aff465e8d6bd14d92da3bb3665dc6a1a060648cdcf0",
+    "scripts/04_train_test_split.py": "385ac0f94288d356d6173204fe4df0cd1ee16b700336d6b8b081db6aa8bdce03",
+    "scripts/05_train_model.py": "7cb8f20e9f363fe679bb3f51b91748163f89c996413cd313306e79465f17946f",
+    "scripts/06_evaluate.py": "b08abe8171b0bcba4e61a9dac41ab3a4e1d4bea050395b71100e4793be7c596c",
+    "scripts/_bootstrap.py": "7abd23e4fb59f682482c57bb8fa143fd94c7fb3090e4e133ea321cd541822b0d",
+    "pyproject.toml": "fe8722a09cf815a9f3afad85ed1623718d8d41cc913b2a504691296bc74099ab",
+    "src/aerosense/evaluation_metrics.py": "4affd38dbe327d2c86e2213be54c80fa05994a5ad0fa0a39fb0a260e227ca356",
+    "src/aerosense/experiment_utils.py": "0942e485632786dc5139f637e953334395e6407ccea6540c259e03f0ec711149",
+    "src/aerosense/model_contract.py": "f37c3803a425aa3c7c98a8dc18c04a7e9888b9f93c59a8ed3b7c80bb82362632",
+    "scripts/run_demo.py": "9092349197b65e72a950f4ed030c6cc93d403441b5cac961bb4b06389b9ad11b"
+  },
+  "config": {
+    "schema_version": 1,
+    "seed": 42,
+    "train_fraction": 0.8,
+    "forecast_horizon_rows": 3,
+    "time_series_cv_splits": 5,
+    "search_iterations": 12,
+    "search_n_jobs": 4,
+    "selection_metric": "f1_macro",
+    "classes": [
+      "Very Good",
+      "Good",
+      "Moderate",
+      "Unhealthy"
+    ],
+    "xgboost": {
+      "parameters": {
+        "n_estimators": [
+          100,
+          200,
+          300,
+          500
+        ],
+        "max_depth": [
+          3,
+          5,
+          7,
+          9
+        ],
+        "learning_rate": [
+          0.01,
+          0.05,
+          0.1,
+          0.2
+        ],
+        "subsample": [
+          0.6,
+          0.8,
+          1.0
+        ],
+        "colsample_bytree": [
+          0.6,
+          0.8,
+          1.0
+        ],
+        "min_child_weight": [
+          1,
+          3,
+          5
+        ]
+      }
+    },
+    "lightgbm": {
+      "parameters": {
+        "n_estimators": [
+          100,
+          200,
+          300,
+          500
+        ],
+        "max_depth": [
+          3,
+          5,
+          7,
+          -1
+        ],
+        "learning_rate": [
+          0.01,
+          0.05,
+          0.1,
+          0.2
+        ],
+        "num_leaves": [
+          15,
+          31,
+          63,
+          127
+        ],
+        "subsample": [
+          0.6,
+          0.8,
+          1.0
+        ],
+        "colsample_bytree": [
+          0.6,
+          0.8,
+          1.0
+        ]
+      }
+    },
+    "demo": {
+      "n_estimators": 100
+    }
+  },
+  "config_sha256": "a84aed66a5973282a14240a02508e5dc30b21e4af56f31ec37eaae4c5020c4fe",
+  "inputs": {
+    "train_csv": {
+      "path": "data/model_ready/train.csv",
+      "sha256": "7034dffe551a4093af00a2de84152487d603555bdc6f64c98f7ebd2d5115592d"
+    },
+    "test_csv": {
+      "path": "data/model_ready/test.csv",
+      "sha256": "1937bb6d16ae3a4ce59c44366162e7e83f3dd123666cf5142580f0885f726855"
+    },
+    "feature_contract": {
+      "path": "outputs/feature_contract.json",
+      "sha256": "7b7ff98d5532cb2861de775e9608419ba11f54818a036487cede78043270cb2e"
+    }
+  },
+  "split": {
+    "train_rows": 869,
+    "test_rows": 218,
+    "train_start": "2023-01-04",
+    "train_end": "2025-11-26",
+    "test_start": "2025-11-30",
+    "test_end": "2026-08-04",
+    "test_fraction": 0.20055197792088317
+  },
+  "packages": {
+    "numpy": "2.5.4",
+    "pandas": "3.1.0",
+    "scikit-learn": "1.9.1",
+    "xgboost": "2.1.4",
+    "lightgbm": "4.7.0",
+    "joblib": "1.6.0"
+  },
+  "selected_models": {
+    "day1": {
+      "name": "xgboost",
+      "cv_f1_macro": 0.6066796885335874,
+      "best_params": {
+        "subsample": 0.8,
+        "n_estimators": 500,
+        "min_child_weight": 5,
+        "max_depth": 9,
+        "learning_rate": 0.01,
+        "colsample_bytree": 1.0
+      }
+    },
+    "day2": {
+      "name": "xgboost",
+      "cv_f1_macro": 0.48118561689604256,
+      "best_params": {
+        "subsample": 0.8,
+        "n_estimators": 100,
+        "min_child_weight": 3,
+        "max_depth": 9,
+        "learning_rate": 0.01,
+        "colsample_bytree": 0.6
+      }
+    },
+    "day3": {
+      "name": "xgboost",
+      "cv_f1_macro": 0.4258787506788361,
+      "best_params": {
+        "subsample": 0.8,
+        "n_estimators": 100,
+        "min_child_weight": 3,
+        "max_depth": 9,
+        "learning_rate": 0.01,
+        "colsample_bytree": 0.6
+      }
+    }
+  },
+  "model_comparison": {
+    "day1": {
+      "xgboost_cv_f1": 0.60668,
+      "xgboost_cv_f1_std": 0.09450041925132024,
+      "lightgbm_cv_f1": 0.576736,
+      "lightgbm_cv_f1_std": 0.11352916073641066,
+      "selected": "xgboost",
+      "xgboost_best_params": {
+        "subsample": 0.8,
+        "n_estimators": 500,
+        "min_child_weight": 5,
+        "max_depth": 9,
+        "learning_rate": 0.01,
+        "colsample_bytree": 1.0
+      },
+      "lightgbm_best_params": {
+        "subsample": 0.8,
+        "num_leaves": 127,
+        "n_estimators": 300,
+        "max_depth": 7,
+        "learning_rate": 0.01,
+        "colsample_bytree": 0.6
+      }
+    },
+    "day2": {
+      "xgboost_cv_f1": 0.481186,
+      "xgboost_cv_f1_std": 0.1048464329886277,
+      "lightgbm_cv_f1": 0.473201,
+      "lightgbm_cv_f1_std": 0.12834910627607532,
+      "selected": "xgboost",
+      "xgboost_best_params": {
+        "subsample": 0.8,
+        "n_estimators": 100,
+        "min_child_weight": 3,
+        "max_depth": 9,
+        "learning_rate": 0.01,
+        "colsample_bytree": 0.6
+      },
+      "lightgbm_best_params": {
+        "subsample": 0.8,
+        "num_leaves": 127,
+        "n_estimators": 300,
+        "max_depth": 7,
+        "learning_rate": 0.01,
+        "colsample_bytree": 0.6
+      }
+    },
+    "day3": {
+      "xgboost_cv_f1": 0.425879,
+      "xgboost_cv_f1_std": 0.06102783790829732,
+      "lightgbm_cv_f1": 0.39486,
+      "lightgbm_cv_f1_std": 0.06945546622284443,
+      "selected": "xgboost",
+      "xgboost_best_params": {
+        "subsample": 0.8,
+        "n_estimators": 100,
+        "min_child_weight": 3,
+        "max_depth": 9,
+        "learning_rate": 0.01,
+        "colsample_bytree": 0.6
+      },
+      "lightgbm_best_params": {
+        "subsample": 0.8,
+        "num_leaves": 127,
+        "n_estimators": 300,
+        "max_depth": 7,
+        "learning_rate": 0.01,
+        "colsample_bytree": 0.6
+      }
+    }
+  }
+}

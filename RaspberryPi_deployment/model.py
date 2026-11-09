@@ -1,329 +1,250 @@
-"""
-AeroSense RMUTI — Flask Inference API (45-feature, 3-day forecast)
-====================================================================
-Runs on the Raspberry Pi (edge server). Loads THREE trained RandomForest
-models (rf_day1.pkl, rf_day2.pkl, rf_day3.pkl), each expecting the full
-45-feature set reported by model.feature_names_in_:
-
-  pm25, temperature_2m, relative_humidity_2m, surface_pressure,
-  month_sin, month_cos, dow_sin, dow_cos,
-  pm25_lag1..7, hum_lag1..7, temp_lag1..7,
-  pm25_roll_mean3/7, hum_roll_mean3/7,
-  pm25_roll_std3/7, pm25_roll_max3/7,
-  pm25_ewma3/7,
-  pm25_delta1, hum_delta1, press_delta1, temp_delta1,
-  pm25_momentum_3d, pm25_momentum_7d
-
-
-"""
-
-from flask import Flask, request, jsonify
-import joblib
-import pandas as pd
-import numpy as np
-import requests
-import os
+"""Flask inference API using the shared training feature and artifact contract."""
 from datetime import datetime, timedelta
+from pathlib import Path
+import sys
+
+from flask import Flask, jsonify, request
+import numpy as np
+import pandas as pd
+import requests
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_DIR = PROJECT_ROOT / "src"
+if str(SOURCE_DIR) not in sys.path:
+    sys.path.insert(0, str(SOURCE_DIR))
+
+from aerosense.model_contract import (  # noqa: E402
+    OBSERVATION_COLUMNS,
+    TARGET_LABELS,
+    engineer_features,
+    load_model_artifact,
+    prepare_feature_frame,
+)
 
 app = Flask(__name__)
 
-# ============================================================
-# CONFIG
-# ============================================================
-MODEL_DIR = "."
-MODEL_PATHS = {
-    "day1": os.path.join(MODEL_DIR, "rf_day1.pkl"),
-    "day2": os.path.join(MODEL_DIR, "rf_day2.pkl"),
-    "day3": os.path.join(MODEL_DIR, "rf_day3.pkl"),
-}
-
-HISTORY_LOG_PATH = "live_sensor_log.csv"
-
-# Need 7 full prior days for lag7/roll7/ewma7 — keep a comfortable buffer.
-MAX_HISTORY = 21
-
+MODEL_DIR = PROJECT_ROOT / "models"
+MODEL_PATHS = {f"day{horizon}": MODEL_DIR / f"best_day{horizon}.pkl" for horizon in range(1, 4)}
+HISTORY_LOG_PATH = Path(__file__).resolve().parent / "live_sensor_log.csv"
+MAX_HISTORY = 30
 RMUTI_LAT, RMUTI_LON = 14.987471, 102.117965
 
-
-# ============================================================
-# 1. Load the three trained models once at startup
-# ============================================================
 models = {}
+model_errors = {}
 for horizon, path in MODEL_PATHS.items():
     try:
-        models[horizon] = joblib.load(path)
-        n_feat = getattr(models[horizon], "n_features_in_", "unknown")
-        print(f"Loaded {horizon} model from {path} (expects {n_feat} features)")
-    except FileNotFoundError:
-        print(f"ERROR: Cannot find {path}. Ensure it is in the same folder.")
+        models[horizon] = load_model_artifact(path)["estimator"]
+        print(f"Loaded compatible {horizon} model from {path}")
+    except FileNotFoundError as exc:
         models[horizon] = None
+        model_errors[horizon] = str(exc)
+        print(f"ERROR: {exc}")
+    except ValueError as exc:
+        models[horizon] = None
+        model_errors[horizon] = str(exc)
+        print(f"ERROR: {exc}")
 
 
-# ============================================================
-# 2. History buffer (CSV-backed) for lag/rolling/ewma features
-# ============================================================
-def load_history():
-    try:
-        df = pd.read_csv(HISTORY_LOG_PATH, parse_dates=["date"])
-        df = df.sort_values("date").tail(MAX_HISTORY).reset_index(drop=True)
-        print(f"Pre-loaded {len(df)} historical rows from {HISTORY_LOG_PATH}")
-        return df
-    except FileNotFoundError:
+def load_history() -> pd.DataFrame:
+    """Load and validate persisted sensor observations."""
+    columns = ["date", *OBSERVATION_COLUMNS]
+    if not HISTORY_LOG_PATH.exists():
         print(f"WARNING: {HISTORY_LOG_PATH} not found. Starting with an empty buffer.")
-        return pd.DataFrame(columns=["date", "pm25", "temperature_2m",
-                                      "relative_humidity_2m", "surface_pressure"])
-    except Exception as e:
-        print(f"WARNING: could not read history CSV ({e}). Starting with an empty buffer.")
-        return pd.DataFrame(columns=["date", "pm25", "temperature_2m",
-                                      "relative_humidity_2m", "surface_pressure"])
+        return pd.DataFrame(columns=columns)
+
+    history = pd.read_csv(HISTORY_LOG_PATH, parse_dates=["date"])
+    missing = sorted(set(columns).difference(history.columns))
+    if missing:
+        raise ValueError(f"History log is missing required columns {missing}; provide a log with wind measurements.")
+    history["date"] = pd.to_datetime(history["date"], errors="coerce")
+    if history["date"].isna().any():
+        raise ValueError(f"History log {HISTORY_LOG_PATH} contains invalid dates.")
+    for column in OBSERVATION_COLUMNS:
+        history[column] = pd.to_numeric(history[column], errors="raise")
+    if history[OBSERVATION_COLUMNS].isna().any().any():
+        raise ValueError(f"History log {HISTORY_LOG_PATH} contains missing sensor readings.")
+    return history.sort_values("date").tail(MAX_HISTORY).reset_index(drop=True)
 
 
 history_df = load_history()
 
 
-def append_and_save(row: dict):
+def append_and_save(row: dict) -> None:
+    """Add or update today's observation and persist the bounded history."""
     global history_df
-    
-    # Convert row date to datetime object for comparison
     row_date = pd.to_datetime(row["date"])
-    
-    # Check if today's date is already in the history buffer
-    if not history_df.empty and row_date in history_df["date"].values:
-        # Update the existing row for today with the latest sensor readings
-        idx = history_df.index[history_df['date'] == row_date].tolist()[0]
-        for key, val in row.items():
-            history_df.at[idx, key] = val
-    else:
-        # It's a new day, append as a new row
-        history_df = pd.concat([history_df, pd.DataFrame([row])], ignore_index=True)
-        
+    row["date"] = row_date
     history_df["date"] = pd.to_datetime(history_df["date"])
+    matching = history_df.index[history_df["date"].eq(row_date)]
+    if len(matching):
+        for key, value in row.items():
+            history_df.at[matching[0], key] = value
+    else:
+        history_df = pd.concat([history_df, pd.DataFrame([row])], ignore_index=True)
     history_df = history_df.sort_values("date").tail(MAX_HISTORY).reset_index(drop=True)
-    
-    try:
-        history_df.to_csv(HISTORY_LOG_PATH, index=False)
-    except Exception as e:
-        print(f"WARNING: failed to persist history log ({e})")
+    history_df.to_csv(HISTORY_LOG_PATH, index=False)
 
 
-# ============================================================
-# 3. Fetch weather forecast from Open-Meteo for day+2/+3
-# ============================================================
-def fetch_forecast_weather():
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": RMUTI_LAT,
-        "longitude": RMUTI_LON,
-        "hourly": "temperature_2m,relative_humidity_2m,surface_pressure",
-        "forecast_days": 4,
-        "timezone": "Asia/Bangkok",
-    }
-    response = requests.get(url, params=params, timeout=15)
+def circular_mean_degrees(values: pd.Series) -> float:
+    """Return a circular mean of wind directions in degrees."""
+    clean = pd.to_numeric(values, errors="coerce").dropna()
+    if clean.empty:
+        return float("nan")
+    radians = np.deg2rad(clean.to_numpy())
+    angle = np.degrees(np.arctan2(np.sin(radians).mean(), np.cos(radians).mean()))
+    return float((angle + 360.0) % 360.0)
+
+
+def fetch_forecast_weather() -> dict:
+    """Fetch daily weather context, including wind, for forecast horizons."""
+    response = requests.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": RMUTI_LAT,
+            "longitude": RMUTI_LON,
+            "hourly": "temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_direction_10m",
+            "forecast_days": 4,
+            "timezone": "Asia/Bangkok",
+        },
+        timeout=15,
+    )
     response.raise_for_status()
     hourly = response.json()["hourly"]
-
-    df = pd.DataFrame(hourly)
-    df["date"] = pd.to_datetime(df["time"]).dt.strftime("%Y-%m-%d")
-
+    weather = pd.DataFrame(hourly)
+    weather["date"] = pd.to_datetime(weather["time"]).dt.strftime("%Y-%m-%d")
+    weather = weather.rename(
+        columns={"wind_speed_10m": "windspeed_10m", "wind_direction_10m": "winddirection_10m"}
+    )
     daily = {}
-    for date, group in df.groupby("date"):
+    for date, group in weather.groupby("date"):
         daily[date] = {
-            "temperature_2m": group["temperature_2m"].mean(),
-            "relative_humidity_2m": group["relative_humidity_2m"].mean(),
-            "surface_pressure": group["surface_pressure"].mean(),
+            "temperature_2m": float(group["temperature_2m"].mean()),
+            "relative_humidity_2m": float(group["relative_humidity_2m"].mean()),
+            "surface_pressure": float(group["surface_pressure"].mean()),
+            "windspeed_10m": float(group["windspeed_10m"].mean()),
+            "winddirection_10m": circular_mean_degrees(group["winddirection_10m"]),
         }
     return daily
 
 
-# ============================================================
-# 4. Feature builder — reproduces the 45-feature schema
-# ============================================================
-def safe_lag(series: pd.Series, i: int):
-    """Return the value i steps back from the end, or the earliest
-    available value if history is shorter than i (cold-boot fallback)."""
-    if len(series) > i:
-        return float(series.iloc[-1 - i])
-    if len(series) > 0:
-        return float(series.iloc[0])
-    return 0.0
+def build_feature_row(observations: pd.DataFrame) -> pd.DataFrame:
+    """Build the latest row using the exact same feature engineering as training."""
+    engineered = engineer_features(observations)
+    return prepare_feature_frame(engineered.iloc[[-1]])
 
 
-def build_feature_row(df_with_target_row: pd.DataFrame):
-    """
-    df_with_target_row: history rows (ascending by date) with the target
-    day's own values as the LAST row (real for day+1, forecasted/persisted
-    for day+2/+3). Returns a dict of all 45 features for that last row.
-    """
-    s_pm = df_with_target_row["pm25"].astype(float).reset_index(drop=True)
-    s_hum = df_with_target_row["relative_humidity_2m"].astype(float).reset_index(drop=True)
-    s_temp = df_with_target_row["temperature_2m"].astype(float).reset_index(drop=True)
-    s_press = df_with_target_row["surface_pressure"].astype(float).reset_index(drop=True)
-    target_date = pd.to_datetime(df_with_target_row["date"].iloc[-1])
-
-    row = {
-        "pm25": float(s_pm.iloc[-1]),
-        "temperature_2m": float(s_temp.iloc[-1]),
-        "relative_humidity_2m": float(s_hum.iloc[-1]),
-        "surface_pressure": float(s_press.iloc[-1]),
-    }
-
-    month = target_date.month
-    dow = target_date.weekday()  # Monday=0
-    row["month_sin"] = float(np.sin(2 * np.pi * month / 12))
-    row["month_cos"] = float(np.cos(2 * np.pi * month / 12))
-    row["dow_sin"] = float(np.sin(2 * np.pi * dow / 7))
-    row["dow_cos"] = float(np.cos(2 * np.pi * dow / 7))
-
-    for i in range(1, 8):
-        row[f"pm25_lag{i}"] = safe_lag(s_pm, i)
-        row[f"hum_lag{i}"] = safe_lag(s_hum, i)
-        row[f"temp_lag{i}"] = safe_lag(s_temp, i)
-
-    def window(series, w):
-        return series.iloc[-w:] if len(series) >= w else series
-
-    row["pm25_roll_mean3"] = float(window(s_pm, 3).mean())
-    row["pm25_roll_mean7"] = float(window(s_pm, 7).mean())
-    row["hum_roll_mean3"] = float(window(s_hum, 3).mean())
-    row["hum_roll_mean7"] = float(window(s_hum, 7).mean())
-    row["pm25_roll_std3"] = float(window(s_pm, 3).std(ddof=0))
-    row["pm25_roll_std7"] = float(window(s_pm, 7).std(ddof=0))
-    row["pm25_roll_max3"] = float(window(s_pm, 3).max())
-    row["pm25_roll_max7"] = float(window(s_pm, 7).max())
-
-    row["pm25_ewma3"] = float(s_pm.ewm(span=3, adjust=False).mean().iloc[-1])
-    row["pm25_ewma7"] = float(s_pm.ewm(span=7, adjust=False).mean().iloc[-1])
-
-    row["pm25_delta1"] = float(s_pm.iloc[-1] - safe_lag(s_pm, 1))
-    row["hum_delta1"] = float(s_hum.iloc[-1] - safe_lag(s_hum, 1))
-    row["press_delta1"] = float(s_press.iloc[-1] - safe_lag(s_press, 1))
-    row["temp_delta1"] = float(s_temp.iloc[-1] - safe_lag(s_temp, 1))
-
-    row["pm25_momentum_3d"] = float(s_pm.iloc[-1] - safe_lag(s_pm, 3))
-    row["pm25_momentum_7d"] = float(s_pm.iloc[-1] - safe_lag(s_pm, 7))
-
-    return row
-
-
-# ============================================================
-# ROUTES
-# ============================================================
 @app.route("/health", methods=["GET"])
 def health():
+    loaded = {key: value is not None for key, value in models.items()}
     return jsonify({
-        "status": "ok",
-        "models_loaded": {k: v is not None for k, v in models.items()},
+        "status": "ok" if all(loaded.values()) else "error",
+        "models_loaded": loaded,
         "history_rows": len(history_df),
+        "model_errors": model_errors,
     })
 
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    """
-    Expects JSON like:
-    {
-        "pm25": 42.3,
-        "temperature": 28.5,
-        "humidity": 65,
-        "pressure": 995
-    }
-    Returns predicted AQI category for day+1, day+2, day+3.
-    """
-    if any(m is None for m in models.values()):
-        return jsonify({"error": "One or more models failed to load on server."}), 500
+    """Return AQI categories and class probabilities for the next three days."""
+    if any(model is None for model in models.values()):
+        return jsonify({
+            "error": "One or more models failed to load or are incompatible.",
+            "model_errors": model_errors,
+        }), 500
 
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object."}), 400
+
+    required_inputs = {
+        "pm25": "pm25",
+        "temperature": "temperature_2m",
+        "humidity": "relative_humidity_2m",
+        "pressure": "surface_pressure",
+    }
     try:
-        data = request.get_json()
-        pm25 = float(data["pm25"])
-        temp = float(data["temperature"])
-        humidity = float(data["humidity"])
-        pressure = float(data["pressure"])
-    except (KeyError, TypeError, ValueError) as e:
-        return jsonify({"error": f"Invalid or missing input: {e}"}), 400
+        values = {column: float(data[key]) for key, column in required_inputs.items()}
+    except (KeyError, TypeError, ValueError) as exc:
+        return jsonify({"error": f"Invalid or missing input: {exc}"}), 400
+    if not np.isfinite(list(values.values())).all():
+        return jsonify({"error": "Sensor readings must be finite numbers."}), 400
+    if values["pm25"] < 0 or values["relative_humidity_2m"] < 0 or values["relative_humidity_2m"] > 100:
+        return jsonify({"error": "PM2.5 must be non-negative and humidity must be between 0 and 100."}), 400
+    if values["surface_pressure"] <= 0:
+        return jsonify({"error": "Pressure must be a positive number."}), 400
+
+    for key, column in (("windspeed", "windspeed_10m"), ("winddirection", "winddirection_10m")):
+        try:
+            values[column] = float(data[key]) if key in data else float(history_df[column].iloc[-1])
+        except (ValueError, IndexError):
+            return jsonify({
+                "error": f"Missing {key}; supply both windspeed and winddirection for a cold start."
+            }), 400
+    if not np.isfinite([values["windspeed_10m"], values["winddirection_10m"]]).all():
+        return jsonify({"error": "Wind readings must be finite numbers."}), 400
+    if values["windspeed_10m"] < 0 or not 0 <= values["winddirection_10m"] <= 360:
+        return jsonify({"error": "Wind speed must be non-negative and direction must be between 0 and 360."}), 400
 
     today = datetime.now()
     today_str = today.strftime("%Y-%m-%d")
-
-    # --- Append today's REAL observation to history, then build day+1 row ---
-    append_and_save({
-        "date": today_str,
-        "pm25": pm25,
-        "temperature_2m": temp,
-        "relative_humidity_2m": humidity,
-        "surface_pressure": pressure,
-    })
-
-    row_day1 = build_feature_row(history_df)
-
-    # --- Pull live forecast for day+2/day+3 weather ---
-    forecast_error = None
-    forecast_by_date = {}
+    today_observation = {"date": today_str, **values}
     try:
-        forecast_by_date = fetch_forecast_weather()
-    except requests.exceptions.RequestException as e:
-        forecast_error = str(e)
-        print(f"WARNING: forecast fetch failed ({e}); "
-              f"day+2/+3 will reuse today's weather as fallback.")
+        append_and_save(today_observation)
+    except OSError as exc:
+        return jsonify({"error": f"Could not persist sensor history: {exc}"}), 500
 
-    def forecast_or_fallback(date_str, key, fallback):
-        if date_str in forecast_by_date:
-            return forecast_by_date[date_str][key]
-        return fallback
+    if len(history_df) < 4:
+        return jsonify({
+            "error": "At least three prior daily sensor observations are required to build lag features."
+        }), 400
 
-    date_day2 = (today + timedelta(days=2)).strftime("%Y-%m-%d")
-    date_day3 = (today + timedelta(days=3)).strftime("%Y-%m-%d")
+    rows = {"day1": build_feature_row(history_df)}
+    confidence_notes = {"day1": "high"}
+    forecast_error = None
+    try:
+        weather_by_date = fetch_forecast_weather()
+    except requests.exceptions.RequestException as exc:
+        forecast_error = str(exc)
+        weather_by_date = {}
 
-    # Day+2 pseudo-row: real forecasted weather, PM2.5 persisted from today
-    df_day2 = pd.concat([history_df, pd.DataFrame([{
-        "date": date_day2,
-        "pm25": pm25,  # persistence — true future PM2.5 is unknown
-        "temperature_2m": forecast_or_fallback(date_day2, "temperature_2m", temp),
-        "relative_humidity_2m": forecast_or_fallback(date_day2, "relative_humidity_2m", humidity),
-        "surface_pressure": forecast_or_fallback(date_day2, "surface_pressure", pressure),
-    }])], ignore_index=True)
-    row_day2 = build_feature_row(df_day2)
+    for horizon in (2, 3):
+        forecast_date = (today + timedelta(days=horizon)).strftime("%Y-%m-%d")
+        forecast = weather_by_date.get(forecast_date, {})
+        if not forecast:
+            missing_forecast = f"No weather forecast available for {forecast_date}; using latest sensor readings."
+            forecast_error = "; ".join(filter(None, (forecast_error, missing_forecast)))
+            confidence_notes[f"day{horizon}"] = "low (weather unavailable; latest sensor readings reused)"
+        else:
+            confidence_notes[f"day{horizon}"] = "mixed (weather forecasted; PM2.5 persisted)"
+        pseudo_row = {
+            "date": forecast_date,
+            "pm25": values["pm25"],
+            "temperature_2m": forecast.get("temperature_2m", values["temperature_2m"]),
+            "relative_humidity_2m": forecast.get("relative_humidity_2m", values["relative_humidity_2m"]),
+            "surface_pressure": forecast.get("surface_pressure", values["surface_pressure"]),
+            "windspeed_10m": forecast.get("windspeed_10m", values["windspeed_10m"]),
+            "winddirection_10m": forecast.get("winddirection_10m", values["winddirection_10m"]),
+        }
+        source = pd.concat([history_df, pd.DataFrame([pseudo_row])], ignore_index=True)
+        rows[f"day{horizon}"] = build_feature_row(source)
 
-    # Day+3 pseudo-row: builds on the day+2 pseudo-row
-    df_day3 = pd.concat([df_day2, pd.DataFrame([{
-        "date": date_day3,
-        "pm25": pm25,  # persistence
-        "temperature_2m": forecast_or_fallback(date_day3, "temperature_2m", temp),
-        "relative_humidity_2m": forecast_or_fallback(date_day3, "relative_humidity_2m", humidity),
-        "surface_pressure": forecast_or_fallback(date_day3, "surface_pressure", pressure),
-    }])], ignore_index=True)
-    row_day3 = build_feature_row(df_day3)
-
-    confidence_notes = {
-        "day1": "high",
-        "day2": "mixed (weather=forecasted/real, pm25-derived=persisted/low)"
-                if not forecast_error else "low (forecast unavailable, used fallback)",
-        "day3": "mixed (weather=forecasted/real, pm25-derived=persisted/low)"
-                if not forecast_error else "low (forecast unavailable, used fallback)",
-    }
-
-    # ------------------------------------------------------------
-    # Run each horizon's model on its matching feature row, using
-    # that model's own expected column order/names.
-    # ------------------------------------------------------------
     results = {}
-    for horizon, row in [("day1", row_day1), ("day2", row_day2), ("day3", row_day3)]:
-        model = models[horizon]
-        expected_cols = list(model.feature_names_in_)
+    for horizon, features in rows.items():
+        estimator = models[horizon]
         try:
-            X = pd.DataFrame([row])[expected_cols]
-        except KeyError as e:
-            return jsonify({
-                "error": f"Feature mismatch building {horizon} row: missing {e}. "
-                         f"Model expects: {expected_cols}"
-            }), 500
-
-        pred = model.predict(X)[0]
-        proba = model.predict_proba(X)[0]
-        class_probs = dict(zip(model.classes_, proba.round(3)))
+            prediction = int(estimator.predict(features)[0])
+            probabilities = estimator.predict_proba(features)[0]
+            class_probabilities = {
+                TARGET_LABELS[int(label)]: round(float(probability), 3)
+                for label, probability in zip(estimator.classes_, probabilities)
+            }
+        except (ValueError, IndexError, KeyError) as exc:
+            return jsonify({"error": f"Inference failed for {horizon}: {exc}"}), 500
         results[horizon] = {
-            "predicted_category": pred,
-            "confidence": round(float(max(proba)), 3),
-            "class_probabilities": class_probs,
+            "predicted_category": TARGET_LABELS[prediction],
+            "confidence": round(float(max(probabilities)), 3),
+            "class_probabilities": class_probabilities,
             "feature_confidence": confidence_notes[horizon],
         }
 
@@ -331,10 +252,10 @@ def predict():
         "forecast": results,
         "forecast_fetch_error": forecast_error,
         "input_received": {
-            "pm25": pm25,
-            "temperature": temp,
-            "humidity": humidity,
-            "pressure": pressure,
+            "pm25": values["pm25"],
+            "temperature": values["temperature_2m"],
+            "humidity": values["relative_humidity_2m"],
+            "pressure": values["surface_pressure"],
         },
     })
 
